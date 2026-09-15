@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL_NAME = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+MODEL_NAME = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 MAX_ITERATIONS = 5
 TOOL_OUTPUT_LIMIT = 6_000
 TOOL_INPUT_LIMIT = 4_000
