@@ -254,13 +254,16 @@ def query_database(sql_query: str) -> str:
         return "Error: comma-separated table access is not allowed. Use explicit JOIN syntax."
     try:
         sb = _supabase_client()
-        resp = sb.rpc("exec_readonly_sql", {"sql_query": sql}).execute()
+        # The server-side executor rejects any semicolon, so send the already
+        # validated statement minus the single permitted trailing one.
+        resp = sb.rpc("exec_readonly_sql", {"sql_query": inner}).execute()
         data = resp.data
     except Exception as e:
         msg = str(e)
         if "exec_readonly_sql" in msg and ("PGRST202" in msg or "not found" in msg.lower() or "schema cache" in msg):
             return "Error: exec_readonly_sql RPC not found. Run EXEC_READONLY_SQL_DDL from tools.py in Supabase SQL Editor."
-        return "Error: database query is temporarily unavailable."
+        cause = f"{type(e).__name__}: {msg}".replace("\n", " ")[:250]
+        return f"Error: database query failed ({cause})."
     # RPC returns a JSON array (json_agg) — supabase-py may unwrap or nest it.
     rows = data
     if rows is None:
