@@ -60,9 +60,13 @@ begin
   end if;
 end
 $$;
+-- Supabase SQL Editor runs as `postgres`; it needs membership before it can
+-- transfer ownership to the no-login function owner.
+grant readonly_agent to postgres;
 grant usage on schema public to readonly_agent;
 grant select on table public.ecommerce_inventory to readonly_agent;
 revoke all on all sequences in schema public from readonly_agent;
+grant create on schema public to readonly_agent;
 
 create or replace function public.exec_readonly_sql(sql_query text)
 returns json
@@ -89,6 +93,7 @@ begin
 end;
 $$;
 alter function public.exec_readonly_sql(text) owner to readonly_agent;
+revoke create on schema public from readonly_agent;
 revoke all on function public.exec_readonly_sql(text) from public;
 revoke all on function public.exec_readonly_sql(text) from anon, authenticated;
 grant execute on function public.exec_readonly_sql(text) to service_role;

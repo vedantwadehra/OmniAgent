@@ -93,6 +93,7 @@ begin
   end if;
 end
 $$;
+grant readonly_agent to postgres;
 grant usage on schema public to readonly_agent;
 grant select on table public.ecommerce_inventory to readonly_agent;
 revoke all on all sequences in schema public from readonly_agent;

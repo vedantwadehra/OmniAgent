@@ -30,9 +30,15 @@ begin
   end if;
 end
 $$;
+-- Supabase's SQL Editor executes as `postgres`, which is not a superuser.
+-- PostgreSQL requires it to be able to SET ROLE before it can transfer ownership.
+grant readonly_agent to postgres;
 grant usage on schema public to readonly_agent;
 grant select on table public.ecommerce_inventory to readonly_agent;
 revoke all on all sequences in schema public from readonly_agent;
+-- A role must have CREATE on the containing schema during an ownership transfer.
+-- Revoke it immediately after, so the function owner remains read-only.
+grant create on schema public to readonly_agent;
 
 create or replace function public.exec_readonly_sql(sql_query text)
 returns json
@@ -59,6 +65,7 @@ begin
 end;
 $$;
 alter function public.exec_readonly_sql(text) owner to readonly_agent;
+revoke create on schema public from readonly_agent;
 revoke all on function public.exec_readonly_sql(text) from public;
 revoke all on function public.exec_readonly_sql(text) from anon, authenticated;
 grant execute on function public.exec_readonly_sql(text) to service_role;
