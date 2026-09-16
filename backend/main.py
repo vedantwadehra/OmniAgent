@@ -3,7 +3,7 @@
 import json
 from typing import Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -57,7 +57,7 @@ class ChatRequest(BaseModel):
 
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     """Run the agent loop and stream SSE: tool_start/tool_end/token/done."""
 
     history = [{"role": m.role, "content": m.content} for m in req.messages]
@@ -66,6 +66,8 @@ async def chat(req: ChatRequest):
         sent_done = False
         try:
             async for ev in stream_agent_events(history):
+                if await request.is_disconnected():
+                    break
                 if ev.get("type") == "done":
                     if sent_done:
                         continue
@@ -74,7 +76,7 @@ async def chat(req: ChatRequest):
         except Exception:
             yield f"data: {json.dumps({'type': 'error', 'code': 'stream_failed', 'message': 'The response stream failed unexpectedly.'})}\n\n"
         finally:
-            if not sent_done:
+            if not sent_done and not await request.is_disconnected():
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(

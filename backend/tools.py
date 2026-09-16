@@ -54,10 +54,58 @@ DANGEROUS_FUNCTION_RE = re.compile(
 )
 RELATION_RE = re.compile(r"\b(from|join)\s+([a-z_][a-z0-9_.]*)", re.IGNORECASE)
 CTE_RE = re.compile(r"(?:\bwith\b|,)\s*([a-z_][a-z0-9_]*)\s+as\s*\(", re.IGNORECASE)
-SECOND_RELATION_RE = re.compile(
-    r"\b(?:from|join)\s+(?:public\.)?ecommerce_inventory(?:\s+(?:as\s+)?[a-z_][a-z0-9_]*)?\s*,",
+# System-information keywords usable bare (current_user) or as calls.
+INFO_DISCLOSURE_RE = re.compile(
+    r"\b(version|current_user|session_user|current_role|current_database|"
+    r"current_catalog|current_schema|current_setting|pg_backend_pid|"
+    r"pg_conf_load_time|pg_postmaster_start_time|inet_client_addr|"
+    r"inet_server_addr|inet_client_port|inet_server_port)\b",
     re.IGNORECASE,
 )
+_CLAUSE_WORDS = frozenset(
+    "where group order limit having window union except intersect returning "
+    "values on using select with join inner left right full outer cross natural".split()
+)
+_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*|\(|\)|,")
+_DERIVED_ALIAS_RE = re.compile(r"\)\s*(?:AS\s+)?([a-z_][a-z0-9_]*)", re.IGNORECASE)
+
+
+def _comma_relations(blanked: str) -> list[str]:
+    """Find table references after top-level commas (implicit joins).
+
+    Operates on SQL with string literals blanked. Tracks parenthesis depth so
+    SELECT-list and function-argument commas are ignored, and only considers
+    commas inside a FROM clause (after FROM/JOIN, before clause keywords).
+    Bare CTE/derived-table aliases defined in-query are returned too; callers
+    allow-list them.
+    """
+    relations: list[str] = []
+    depth = 0
+    in_from = False
+    expect_table = False
+    for match in _TOKEN_RE.finditer(blanked.lower()):
+        token = match.group(0)
+        if token == "(":
+            depth += 1
+            expect_table = False  # derived table: inner FROMs are checked separately
+        elif token == ")":
+            depth = max(0, depth - 1)
+            expect_table = False  # alias after ')' is defined inline, not a relation
+        elif depth != 0:
+            continue
+        elif token == ",":
+            if in_from:
+                expect_table = True
+        elif token in ("from", "join"):
+            in_from = True
+            expect_table = True
+        elif token in _CLAUSE_WORDS:
+            in_from = False
+            expect_table = False
+        elif expect_table and re.fullmatch(r"[a-z_][a-z0-9_.]*", token):
+            relations.append(token)
+            expect_table = False
+    return relations
 
 EXEC_READONLY_SQL_DDL = """-- OmniAgent hardened read-only SQL executor (run once in Supabase SQL Editor)
 -- The no-login owner has SELECT only on ecommerce_inventory. Even a parser bypass
@@ -87,14 +135,19 @@ as $$
 declare
   result json;
   q text := lower(sql_query);
+  checked_q text;
 begin
+  -- Ignore ordinary SQL string contents when applying lexical safeguards.
+  -- This allows values such as 'Drop Shoulder Bag' without weakening the
+  -- checks on executable SQL keywords.
+  checked_q := regexp_replace(q, $lit$'(?:''|[^'])*'$lit$, ' ', 'g');
   if q !~ '^\\s*(select|with)\\M' then
     raise exception 'Only SELECT/WITH queries are allowed';
   end if;
-  if q ~ '(--|/\\*|\\*/|;)' then
+  if checked_q ~ '(--|/\\*|\\*/|;)' then
     raise exception 'Comments and multiple statements are not allowed';
   end if;
-  if q ~ '\\m(insert|update|delete|drop|alter|truncate|create|grant|revoke|copy|vacuum|call|do|execute|merge|replace|prepare|listen|notify|comment|security|handler|into|table)\\M' then
+  if checked_q ~ '\\m(insert|update|delete|drop|alter|truncate|create|grant|revoke|copy|vacuum|call|do|execute|merge|replace|prepare|listen|notify|comment|security|handler|into|table)\\M' then
     raise exception 'Blocked keyword detected: only read-only SELECT allowed';
   end if;
   execute 'select coalesce(json_agg(t), ''[]''::json) from (' || btrim(sql_query) || ') t' into result;
@@ -193,7 +246,9 @@ def _tavily_results(query: str) -> list[dict] | None:
 
 def search_web(query: str) -> str:
     """Fetch top web results from Tavily, with DuckDuckGo as a fallback."""
-    q = (query or "").strip()
+    if not isinstance(query, str):
+        return "Error: web query must be a string."
+    q = query.strip()
     if not q:
         return "No results found: empty web query."
     if len(q) > MAX_QUERY_LENGTH:
@@ -224,7 +279,9 @@ YAHOO_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
 
 def get_stock_quote(ticker: str) -> str:
     """Return the latest market quote for a stock/crypto ticker. Never raises."""
-    symbol = (ticker or "").strip().upper().replace(" ", "")
+    if not isinstance(ticker, str):
+        return "Error: ticker must be a string."
+    symbol = ticker.strip().upper().replace(" ", "")
     if not symbol:
         return "No results found: empty ticker."
     if not TICKER_RE.match(symbol):
@@ -264,6 +321,7 @@ def get_stock_quote(ticker: str) -> str:
             if price is None:
                 errors.append("no price in response")
                 continue
+            price = round(price, 2)
             parts = [f"{symbol}: {price} {currency}".strip()]
             if last_date:
                 parts.append(f"last close {last_close} on {last_date}")
@@ -285,7 +343,9 @@ def get_stock_quote(ticker: str) -> str:
 
 def search_documents(query: str) -> str:
     """Embed query and return top 2 pgvector matches. Never raises."""
-    q = (query or "").strip()
+    if not isinstance(query, str):
+        return "Error: document query must be a string."
+    q = query.strip()
     if not q:
         return "No results found: empty document query."
     if len(q) > MAX_QUERY_LENGTH:
@@ -345,11 +405,15 @@ def _format_rows_markdown(rows: list) -> str:
 
 def query_database(sql_query: str) -> str:
     """Execute read-only SELECT via exec_readonly_sql RPC. Blocks writes via regex. Never raises."""
-    sql = (sql_query or "").strip()
+    if not isinstance(sql_query, str):
+        return "Error: SQL query must be a string."
+    if len(sql_query) > MAX_SQL_LENGTH:
+        return "Error: SQL query exceeds the 4000 character limit."
+    sql = sql_query.strip()
     if not sql:
         return "Error: empty SQL query."
-    if len(sql) > MAX_SQL_LENGTH:
-        return "Error: SQL query exceeds the 4000 character limit."
+    if "\x00" in sql:
+        return "Error: invalid character in SQL query."
     if not SELECT_ONLY_RE.match(sql):
         return "Error: only read-only SELECT/WITH queries are allowed (must start with SELECT or WITH)."
     # Ignore ordinary string contents while checking lexical safeguards. A
@@ -357,7 +421,7 @@ def query_database(sql_query: str) -> str:
     inspected_sql = SQL_STRING_LITERAL_RE.sub("''", sql)
     if SQL_COMMENT_RE.search(inspected_sql):
         return "Error: SQL comments are not allowed."
-    if QUOTED_IDENTIFIER_RE.search(sql):
+    if QUOTED_IDENTIFIER_RE.search(inspected_sql):
         return "Error: quoted SQL identifiers are not allowed."
     # Allow single trailing semicolon only; reject stacked statements.
     inner = sql.rstrip()
@@ -370,17 +434,22 @@ def query_database(sql_query: str) -> str:
         return f"Error: blocked keyword '{m.group(1).upper()}'. Only read-only SELECT/WITH queries allowed."
     if DANGEROUS_FUNCTION_RE.search(inspected_sql):
         return "Error: privileged PostgreSQL functions are not allowed."
+    if INFO_DISCLOSURE_RE.search(inspected_sql):
+        return "Error: system information functions are not allowed."
     if SYSTEM_RELATION_RE.search(inspected_sql):
         return "Error: system schemas and PostgreSQL internal relations are not allowed."
     # The RPC is security-definer, so constrain all direct table access to the
-    # inventory dataset (plus CTE aliases defined inside this statement).
+    # inventory dataset (plus CTE/derived aliases defined inside this statement).
+    # Both FROM/JOIN references and comma-separated (implicit join) references
+    # are checked: `FROM inv, store_documents` must not slip through.
     cte_names = {match.lower() for match in CTE_RE.findall(inspected_sql)}
-    allowed_relations = {"ecommerce_inventory", "public.ecommerce_inventory", *cte_names}
-    for _, relation in RELATION_RE.findall(inspected_sql):
+    derived = {match.lower() for match in _DERIVED_ALIAS_RE.findall(inspected_sql)}
+    allowed_relations = {"ecommerce_inventory", "public.ecommerce_inventory", *cte_names, *derived}
+    refs = [relation for _, relation in RELATION_RE.findall(inspected_sql)]
+    refs += _comma_relations(inspected_sql)
+    for relation in refs:
         if relation.lower() not in allowed_relations:
             return "Error: queries may only read from ecommerce_inventory."
-    if SECOND_RELATION_RE.search(inspected_sql):
-        return "Error: comma-separated table access is not allowed. Use explicit JOIN syntax."
     try:
         sb = _supabase_client()
         # The server-side executor rejects any semicolon, so send the already

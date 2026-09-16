@@ -142,7 +142,12 @@ const mdComponents = {
   h3: ({ children }) => <h3 className="mb-1 text-sm font-semibold">{children}</h3>,
   h4: ({ children }) => <h4 className="mb-1 text-sm font-semibold">{children}</h4>,
   a: ({ children, href }) => (
-    <a href={href} target="_blank" rel="noreferrer" className="text-cyan-300 underline hover:text-cyan-200">
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-cyan-300 underline hover:text-cyan-200"
+    >
       {children}
     </a>
   ),
@@ -296,10 +301,9 @@ export default function App() {
             const output = eventText(ev.error ?? ev.output);
             if (index >= 0) {
               tools[index] = { ...tools[index], output, status: failed ? "failed" : "done" };
-            } else {
-              const callId = ev.call_id || `${ev.tool || "unknown"}-${++toolCounter.current}`;
-              tools.push({ key: callId, callId, tool: ev.tool || "unknown", input: ev.input || {}, output, status: failed ? "failed" : "done" });
             }
+            // Orphan completion with no matching start: ignore rather than
+            // inventing a tool pill for work the UI never showed starting.
             return { ...m, tools };
           });
           if (ev.call_id) activeCalls.delete(ev.call_id);
@@ -319,7 +323,9 @@ export default function App() {
           streamFinished = true;
           setLoading(false);
         } else {
-          throw new Error(`Unsupported stream event type: ${ev.type}`);
+          // Ignore unknown future event types so new backend events degrade
+          // gracefully instead of killing the whole in-progress answer.
+          return;
         }
       };
       for (;;) {
@@ -400,9 +406,10 @@ export default function App() {
                   <button
                     key={s}
                     type="button"
+                    disabled={loading}
                     onClick={() => sendMessage(s)}
                     aria-label={`Ask: ${s}`}
-                    className="rounded-full border border-slate-700 bg-slate-800/60 px-3 py-1.5 text-xs text-cyan-200 hover:border-cyan-600"
+                    className="rounded-full border border-slate-700 bg-slate-800/60 px-3 py-1.5 text-xs text-cyan-200 hover:border-cyan-600 disabled:opacity-40"
                   >
                     {s}
                   </button>
@@ -429,7 +436,13 @@ export default function App() {
                   m.tools.map((t) => <ToolPill key={t.key} run={t} />)}
                 {m.role === "assistant" ? (
                   <div className="text-sm leading-relaxed">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={mdComponents}
+                      urlTransform={(url) =>
+                        /^(https?:|mailto:)/i.test(url || "") ? url : "#"
+                      }
+                    >
                       {cleanDisplayText(m.content)}
                     </ReactMarkdown>
                     {loading && !m.content && (
