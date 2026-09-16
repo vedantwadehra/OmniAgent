@@ -16,6 +16,7 @@ const TOOL_META = {
   search_web: { verb: "Searching Web", short: "Web" },
   search_documents: { verb: "Searching Docs", short: "Docs" },
   query_database: { verb: "Querying Database", short: "SQL" },
+  get_stock_quote: { verb: "Getting Stock Quote", short: "Quote" },
 };
 
 const SUGGESTIONS = [
@@ -32,7 +33,9 @@ function inputSummary(tool, input) {
   const raw =
     tool === "query_database"
       ? input?.sql_query || ""
-      : input?.query || "";
+      : tool === "get_stock_quote"
+        ? input?.ticker || ""
+        : input?.query || "";
   const s = String(raw).replace(/\s+/g, " ").trim();
   return s.length > 80 ? s.slice(0, 80) + "…" : s;
 }

@@ -1,9 +1,10 @@
-"""OmniAgent tools (Phase 3). Pure API calls, no LangChain/LlamaIndex.
+"""OmniAgent tools. Pure API calls, no LangChain/LlamaIndex.
 
-Three tools, each returns str and never raises:
+Four tools, each returns str and never raises:
   - search_web(query) -> top 5 Tavily results (DuckDuckGo fallback)
   - search_documents(query) -> top 2 Supabase pgvector matches
   - query_database(sql_query) -> read-only SELECT via exec_readonly_sql RPC
+  - get_stock_quote(ticker) -> latest market quote via Yahoo Finance
 
 Run EXEC_READONLY_SQL_DDL once in Supabase SQL Editor before query_database.
 """
@@ -215,6 +216,71 @@ def search_web(query: str) -> str:
     except Exception:
         return "Error: web search is temporarily unavailable."
     return _format_web_results(q, results)
+
+
+TICKER_RE = re.compile(r"^[A-Za-z0-9.\-=]{1,12}$")
+YAHOO_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+
+
+def get_stock_quote(ticker: str) -> str:
+    """Return the latest market quote for a stock/crypto ticker. Never raises."""
+    symbol = (ticker or "").strip().upper().replace(" ", "")
+    if not symbol:
+        return "No results found: empty ticker."
+    if not TICKER_RE.match(symbol):
+        return f"Error: '{ticker.strip()}' is not a valid ticker symbol."
+    errors: list[str] = []
+    for host in YAHOO_HOSTS:
+        try:
+            req = urllib.request.Request(
+                f"https://{host}/v8/finance/chart/{symbol}?interval=1d&range=5d",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            err = (data.get("chart") or {}).get("error")
+            if err:
+                return f"No results found for ticker '{symbol}'."
+            result = (data.get("chart") or {}).get("result") or []
+            if not result:
+                errors.append("empty response")
+                continue
+            meta = result[0].get("meta") or {}
+            price = meta.get("regularMarketPrice")
+            currency = meta.get("currency", "")
+            exchange = meta.get("exchangeName", "")
+            prev_close = meta.get("chartPreviousClose")
+            timestamps = result[0].get("timestamp") or []
+            closes = ((result[0].get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+            last_date, last_close = "", ""
+            for ts, close in zip(timestamps, closes):
+                if close:
+                    import datetime as _dt
+
+                    last_date = _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).strftime("%Y-%m-%d")
+                    last_close = close
+            if price is None:
+                price = last_close
+            if price is None:
+                errors.append("no price in response")
+                continue
+            parts = [f"{symbol}: {price} {currency}".strip()]
+            if last_date:
+                parts.append(f"last close {last_close} on {last_date}")
+            if prev_close:
+                parts.append(f"previous close {prev_close}")
+            if exchange:
+                parts.append(exchange)
+            return (
+                "Stock quote: " + ", ".join(parts)
+                + ". Intraday quotes delayed ~15 minutes. Source: Yahoo Finance."
+            )
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {str(e)[:120]}")
+            continue
+    if errors and all("404" in err for err in errors):
+        return f"No results found for ticker '{symbol}'."
+    return f"Error: stock quote is temporarily unavailable. ({'; '.join(errors)})"
 
 
 def search_documents(query: str) -> str:
