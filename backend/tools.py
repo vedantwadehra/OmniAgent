@@ -1,7 +1,7 @@
 """OmniAgent tools (Phase 3). Pure API calls, no LangChain/LlamaIndex.
 
 Three tools, each returns str and never raises:
-  - search_web(query) -> top 3 Tavily results (DuckDuckGo fallback)
+  - search_web(query) -> top 5 Tavily results (DuckDuckGo fallback)
   - search_documents(query) -> top 2 Supabase pgvector matches
   - query_database(sql_query) -> read-only SELECT via exec_readonly_sql RPC
 
@@ -34,6 +34,11 @@ BLOCKED_SQL_RE = re.compile(
     re.IGNORECASE,
 )
 SELECT_ONLY_RE = re.compile(r"^\s*(select|with)\b", re.IGNORECASE | re.DOTALL)
+# Queries asking for current information go to the news index (last week).
+FRESH_QUERY_RE = re.compile(
+    r"\b(right\s+now|today|tonight|current(ly)?|latest|live|this\s+week|breaking|price|prices|stock(s)?|weather|election|score(s)?)\b",
+    re.IGNORECASE,
+)
 SQL_COMMENT_RE = re.compile(r"--|/\*|\*/")
 SQL_STRING_LITERAL_RE = re.compile(r"'(?:''|[^'])*'", re.DOTALL)
 QUOTED_IDENTIFIER_RE = re.compile(r'"')
@@ -134,31 +139,43 @@ def _format_web_results(query: str, results: list[dict]) -> str:
     if not results:
         return f"No results found for '{query}'."
     lines = []
-    for i, result in enumerate(results[:3], 1):
+    for i, result in enumerate(results[:5], 1):
         title = str(result.get("title") or "Untitled").strip()
         url = str(result.get("url") or result.get("href") or "").strip()
         snippet = str(result.get("content") or result.get("body") or "").strip().replace("\n", " ")[:400]
-        lines.append(f"{i}. {title}\n   URL: {url}\n   Snippet: {snippet}")
+        date = str(result.get("published_date") or result.get("date") or "").strip()[:10]
+        entry = f"{i}. {title}\n   URL: {url}"
+        if date:
+            entry += f"\n   Date: {date}"
+        entry += f"\n   Snippet: {snippet}"
+        lines.append(entry)
     return "Web results for '{}':\n".format(query) + "\n".join(lines)
 
 
 def _tavily_results(query: str) -> list[dict] | None:
-    """Fetch Tavily results; return None on provider failure for fallback handling."""
+    """Fetch Tavily results; return None on provider failure for fallback handling.
+
+    Time-sensitive queries go to the news index (last week) so answers are
+    current; everything else uses the general index. News items carry
+    published dates that the model must prefer.
+    """
 
     if not TAVILY_API_KEY:
         return None
-    payload = json.dumps(
-        {
-            "api_key": TAVILY_API_KEY,
-            "query": query,
-            "search_depth": "basic",
-            "max_results": 3,
-            "include_answer": False,
-        }
-    ).encode("utf-8")
+    fresh = bool(FRESH_QUERY_RE.search(query))
+    payload = {
+        "api_key": TAVILY_API_KEY,
+        "query": query,
+        "max_results": 5,
+        "include_answer": False,
+    }
+    if fresh:
+        payload.update({"topic": "news", "time_range": "week", "search_depth": "basic"})
+    else:
+        payload.update({"search_depth": "advanced"})
     request = urllib.request.Request(
         "https://api.tavily.com/search",
-        data=payload,
+        data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
