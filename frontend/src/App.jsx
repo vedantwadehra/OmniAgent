@@ -97,6 +97,56 @@ function ToolPill({ run }) {
 let idCounter = 1;
 const nextId = () => idCounter++;
 
+const HISTORY_STORAGE_KEY = "omniagent-history-v1";
+const MAX_STORED_MESSAGES = 30;
+
+function sanitizeLoadedMessages(value) {
+  if (!Array.isArray(value)) return [];
+  let maxId = 0;
+  const clean = [];
+  for (const m of value) {
+    if (!m || typeof m !== "object") continue;
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    const id = typeof m.id === "number" && m.id > 0 ? m.id : nextId();
+    if (id > maxId) maxId = id;
+    const tools = Array.isArray(m.tools) ? m.tools : [];
+    clean.push({
+      id,
+      role: m.role,
+      content: typeof m.content === "string" ? m.content.slice(0, 8000) : "",
+      tools: tools
+        .filter((t) => t && typeof t === "object")
+        .map((t) => {
+          const running = t.status === "running";
+          return {
+            key: String(t.key ?? t.callId ?? nextId()),
+            callId: typeof t.callId === "string" ? t.callId : undefined,
+            tool: typeof t.tool === "string" ? t.tool : "unknown",
+            input: t.input && typeof t.input === "object" ? t.input : {},
+            output: running
+              ? "Interrupted by page reload before this tool completed."
+              : typeof t.output === "string"
+                ? t.output.slice(0, 6000)
+                : "",
+            status: running ? "failed" : t.status === "done" ? "done" : "failed",
+          };
+        }),
+    });
+  }
+  if (maxId >= idCounter) idCounter = maxId + 1;
+  return clean;
+}
+
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    return sanitizeLoadedMessages(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
+
 function historyContent(message) {
   if (!message.tools?.length) return message.content;
   const evidence = message.tools.map((run) => {
@@ -188,12 +238,26 @@ function parseSseFrame(frame) {
 }
 
 export default function App() {
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState(loadHistory);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [backendState, setBackendState] = useState("checking"); // checking | online | waking
   const scrollRef = useRef(null);
   const toolCounter = useRef(0);
+
+  // Persist history in this browser so a refresh keeps the conversation.
+  // Best-effort: private mode or quota errors must never break the chat.
+  useEffect(() => {
+    try {
+      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(messages.slice(-MAX_STORED_MESSAGES)));
+    } catch {
+      try {
+        localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(messages.slice(-10)));
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [messages]);
 
   // Ping /health on load; banner if slower than 2s (Render free-tier cold start).
   useEffect(() => {
@@ -486,7 +550,9 @@ export default function App() {
           </button>
         </form>
         <p className="mt-2 text-center text-xs text-slate-500">
-          Tools: web search · policy docs · read-only SQL
+          Tools: web search · policy docs · read-only SQL · live quotes
+          <br />
+          History is kept in this browser (recent messages only — older turns drop off).
         </p>
       </section>
     </main>
