@@ -50,14 +50,19 @@ as $$
 declare
   result json;
   q text := lower(sql_query);
+  checked_q text;
 begin
+  -- Ignore ordinary SQL string contents when applying lexical safeguards.
+  -- This allows values such as 'Drop Shoulder Bag' without weakening the
+  -- checks on executable SQL keywords.
+  checked_q := regexp_replace(q, $lit$'(?:''|[^'])*'$lit$, ' ', 'g');
   if q !~ '^\s*(select|with)\M' then
     raise exception 'Only SELECT/WITH queries are allowed';
   end if;
-  if q ~ '(--|/\*|\*/|;)' then
+  if checked_q ~ '(--|/\*|\*/|;)' then
     raise exception 'Comments and multiple statements are not allowed';
   end if;
-  if q ~ '\m(insert|update|delete|drop|alter|truncate|create|grant|revoke|copy|vacuum|call|do|execute|merge|replace|prepare|listen|notify|comment|security|handler|into|table)\M' then
+  if checked_q ~ '\m(insert|update|delete|drop|alter|truncate|create|grant|revoke|copy|vacuum|call|do|execute|merge|replace|prepare|listen|notify|comment|security|handler|into|table)\M' then
     raise exception 'Blocked keyword detected: only read-only SELECT allowed';
   end if;
   execute 'select coalesce(json_agg(t), ''[]''::json) from (' || btrim(sql_query) || ') t' into result;

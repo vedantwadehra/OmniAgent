@@ -1,16 +1,18 @@
 """OmniAgent tools (Phase 3). Pure API calls, no LangChain/LlamaIndex.
 
 Three tools, each returns str and never raises:
-  - search_web(query) -> top 3 DuckDuckGo results
+  - search_web(query) -> top 3 Tavily results (DuckDuckGo fallback)
   - search_documents(query) -> top 2 Supabase pgvector matches
   - query_database(sql_query) -> read-only SELECT via exec_readonly_sql RPC
 
 Run EXEC_READONLY_SQL_DDL once in Supabase SQL Editor before query_database.
 """
 
+import json
 import os
 import re
 import time
+import urllib.request
 
 from dotenv import load_dotenv
 
@@ -19,6 +21,7 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
 EMBED_MODEL = "models/gemini-embedding-001"
 EMBED_DIMS = 768
@@ -125,13 +128,64 @@ def _configure_genai():
         _genai_configured = True
 
 
+def _format_web_results(query: str, results: list[dict]) -> str:
+    """Render provider-neutral web results without exposing provider metadata."""
+
+    if not results:
+        return f"No results found for '{query}'."
+    lines = []
+    for i, result in enumerate(results[:3], 1):
+        title = str(result.get("title") or "Untitled").strip()
+        url = str(result.get("url") or result.get("href") or "").strip()
+        snippet = str(result.get("content") or result.get("body") or "").strip().replace("\n", " ")[:400]
+        lines.append(f"{i}. {title}\n   URL: {url}\n   Snippet: {snippet}")
+    return "Web results for '{}':\n".format(query) + "\n".join(lines)
+
+
+def _tavily_results(query: str) -> list[dict] | None:
+    """Fetch Tavily results; return None on provider failure for fallback handling."""
+
+    if not TAVILY_API_KEY:
+        return None
+    payload = json.dumps(
+        {
+            "api_key": TAVILY_API_KEY,
+            "query": query,
+            "search_depth": "basic",
+            "max_results": 3,
+            "include_answer": False,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.tavily.com/search",
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return None
+    return [result for result in results if isinstance(result, dict)]
+
+
 def search_web(query: str) -> str:
-    """Fetch top 3 DuckDuckGo results. Never raises; returns error string on failure."""
+    """Fetch top web results from Tavily, with DuckDuckGo as a fallback."""
     q = (query or "").strip()
     if not q:
         return "No results found: empty web query."
     if len(q) > MAX_QUERY_LENGTH:
         return "Error: web query exceeds the 4000 character limit."
+
+    if TAVILY_API_KEY:
+        tavily_results = _tavily_results(q)
+        if tavily_results is not None:
+            return _format_web_results(q, tavily_results)
+
     try:
         from duckduckgo_search import DDGS
 
@@ -143,15 +197,7 @@ def search_web(query: str) -> str:
             results = ddgs.text(q, max_results=3)
     except Exception:
         return "Error: web search is temporarily unavailable."
-    if not results:
-        return f"No results found for '{q}'."
-    lines = []
-    for i, r in enumerate(results[:3], 1):
-        title = (r.get("title") or "Untitled").strip()
-        url = (r.get("href") or r.get("url") or "").strip()
-        snippet = (r.get("body") or "").strip().replace("\n", " ")[:400]
-        lines.append(f"{i}. {title}\n   URL: {url}\n   Snippet: {snippet}")
-    return "Web results for '{}':\n".format(q) + "\n".join(lines)
+    return _format_web_results(q, results)
 
 
 def search_documents(query: str) -> str:
@@ -223,7 +269,10 @@ def query_database(sql_query: str) -> str:
         return "Error: SQL query exceeds the 4000 character limit."
     if not SELECT_ONLY_RE.match(sql):
         return "Error: only read-only SELECT/WITH queries are allowed (must start with SELECT or WITH)."
-    if SQL_COMMENT_RE.search(sql):
+    # Ignore ordinary string contents while checking lexical safeguards. A
+    # product name may legitimately contain words such as "drop" or "table".
+    inspected_sql = SQL_STRING_LITERAL_RE.sub("''", sql)
+    if SQL_COMMENT_RE.search(inspected_sql):
         return "Error: SQL comments are not allowed."
     if QUOTED_IDENTIFIER_RE.search(sql):
         return "Error: quoted SQL identifiers are not allowed."
@@ -231,11 +280,8 @@ def query_database(sql_query: str) -> str:
     inner = sql.rstrip()
     if inner.endswith(";"):
         inner = inner[:-1]
-    if ";" in inner:
+    if ";" in SQL_STRING_LITERAL_RE.sub("''", inner):
         return "Error: multiple SQL statements are not allowed."
-    # Ignore words inside ordinary string literals so an inventory filter such
-    # as WHERE product_name = 'Drop Shoulder Bag' remains queryable.
-    inspected_sql = SQL_STRING_LITERAL_RE.sub("''", sql)
     m = BLOCKED_SQL_RE.search(inspected_sql)
     if m:
         return f"Error: blocked keyword '{m.group(1).upper()}'. Only read-only SELECT/WITH queries allowed."
@@ -262,8 +308,7 @@ def query_database(sql_query: str) -> str:
         msg = str(e)
         if "exec_readonly_sql" in msg and ("PGRST202" in msg or "not found" in msg.lower() or "schema cache" in msg):
             return "Error: exec_readonly_sql RPC not found. Run EXEC_READONLY_SQL_DDL from tools.py in Supabase SQL Editor."
-        cause = f"{type(e).__name__}: {msg}".replace("\n", " ")[:250]
-        return f"Error: database query failed ({cause})."
+        return "Error: database query is temporarily unavailable."
     # RPC returns a JSON array (json_agg) — supabase-py may unwrap or nest it.
     rows = data
     if rows is None:
