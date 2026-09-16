@@ -10,6 +10,10 @@ import {
   ChevronDown,
   User,
   Wrench,
+  Plus,
+  Trash2,
+  History,
+  X,
 } from "lucide-react";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -97,10 +101,14 @@ function ToolPill({ run }) {
 let idCounter = 1;
 const nextId = () => idCounter++;
 
-const HISTORY_STORAGE_KEY = "omniagent-history-v1";
+const DRAFT_KEY = "omniagent-draft-v1";
+const LEGACY_KEY = "omniagent-history-v1"; // pre-sidebar drafts migrate once
+const ARCHIVE_KEY = "omniagent-archive-v1";
+const SESSION_FLAG = "omniagent-live-tab";
 const MAX_STORED_MESSAGES = 30;
+const MAX_ARCHIVED_CHATS = 20;
 
-function sanitizeLoadedMessages(value) {
+function sanitizeMessages(value) {
   if (!Array.isArray(value)) return [];
   let maxId = 0;
   const clean = [];
@@ -139,12 +147,71 @@ function sanitizeLoadedMessages(value) {
 
 function loadHistory() {
   try {
-    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    const raw = localStorage.getItem(DRAFT_KEY);
     if (!raw) return [];
-    return sanitizeLoadedMessages(JSON.parse(raw));
+    return sanitizeMessages(JSON.parse(raw));
   } catch {
     return [];
   }
+}
+
+function readJSON(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    const value = raw ? JSON.parse(raw) : null;
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+function chatTitle(messages) {
+  const first = messages.find((m) => m.role === "user");
+  const text = String(first?.content || "Untitled chat").replace(/\s+/g, " ").trim();
+  return text.length > 42 ? text.slice(0, 42) + "…" : text || "Untitled chat";
+}
+
+// Tab lifecycle: a reload keeps the same sessionStorage, a closed+reopened
+// tab does not. Refresh → resume draft. New tab → archive a non-empty draft
+// as a past chat and start fresh. Idempotent (archive clears the draft), so
+// double-invocation is safe.
+function initChat() {
+  let tabAlive = false;
+  try {
+    tabAlive = !!sessionStorage.getItem(SESSION_FLAG);
+  } catch {
+    tabAlive = true; // storage blocked: never archive, never lose text
+  }
+  let draft = loadHistory();
+  if (draft.length === 0) {
+    const legacy = readJSON(LEGACY_KEY);
+    if (legacy.length) {
+      draft = sanitizeMessages(legacy);
+      try {
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+        localStorage.removeItem(LEGACY_KEY);
+      } catch { /* ignore */ }
+    }
+  }
+  if (!tabAlive && draft.length > 0) {
+    const archive = readJSON(ARCHIVE_KEY);
+    archive.unshift({ id: Date.now(), title: chatTitle(draft), at: Date.now(), messages: draft });
+    try {
+      localStorage.setItem(ARCHIVE_KEY, JSON.stringify(archive.slice(0, MAX_ARCHIVED_CHATS)));
+      localStorage.removeItem(DRAFT_KEY);
+    } catch { /* ignore */ }
+    draft = [];
+  }
+  try {
+    sessionStorage.setItem(SESSION_FLAG, "1");
+  } catch { /* ignore */ }
+  return draft;
+}
+
+function loadArchive() {
+  return readJSON(ARCHIVE_KEY).filter(
+    (c) => c && typeof c === "object" && Array.isArray(c.messages),
+  );
 }
 
 function historyContent(message) {
@@ -238,26 +305,60 @@ function parseSseFrame(frame) {
 }
 
 export default function App() {
-  const [messages, setMessages] = useState(loadHistory);
+  const [messages, setMessages] = useState(initChat);
+  const [history, setHistory] = useState(loadArchive);
+  const [showHistory, setShowHistory] = useState(false);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [backendState, setBackendState] = useState("checking"); // checking | online | waking
   const scrollRef = useRef(null);
   const toolCounter = useRef(0);
 
-  // Persist history in this browser so a refresh keeps the conversation.
+  // Persist the live draft in this browser so a refresh keeps the chat.
   // Best-effort: private mode or quota errors must never break the chat.
   useEffect(() => {
     try {
-      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(messages.slice(-MAX_STORED_MESSAGES)));
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(messages.slice(-MAX_STORED_MESSAGES)));
     } catch {
       try {
-        localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(messages.slice(-10)));
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(messages.slice(-10)));
       } catch {
         /* ignore */
       }
     }
   }, [messages]);
+
+  function saveArchive(list) {
+    setHistory(list);
+    try {
+      localStorage.setItem(ARCHIVE_KEY, JSON.stringify(list.slice(0, MAX_ARCHIVED_CHATS)));
+    } catch { /* ignore */ }
+  }
+
+  function startNewChat() {
+    setMessages((current) => {
+      if (current.length > 0) {
+        saveArchive([
+          { id: Date.now(), title: chatTitle(current), at: Date.now(), messages: current },
+          ...history,
+        ]);
+      }
+      return [];
+    });
+    setShowHistory(false);
+  }
+
+  function openArchived(id) {
+    const item = history.find((c) => c.id === id);
+    if (!item) return;
+    saveArchive(history.filter((c) => c.id !== id)); // move, not copy
+    setMessages(sanitizeMessages(item.messages));
+    setShowHistory(false);
+  }
+
+  function deleteArchived(id) {
+    saveArchive(history.filter((c) => c.id !== id));
+  }
 
   // Ping /health on load; banner if slower than 2s (Render free-tier cold start).
   useEffect(() => {
@@ -421,8 +522,86 @@ export default function App() {
 
   return (
     <main className="flex h-dvh flex-col bg-slate-950 text-slate-100">
+      <div className="mx-auto flex min-h-0 w-full max-w-6xl flex-1">
+        {/* History sidebar */}
+        <aside
+          className={
+            showHistory
+              ? "fixed inset-y-0 left-0 z-20 flex w-72 shrink-0 flex-col border-r border-slate-800 bg-slate-950 py-6 pl-4 pr-3"
+              : "hidden w-72 shrink-0 flex-col border-r border-slate-800 py-6 pl-4 pr-3 md:flex"
+          }
+        >
+          <div className="mb-3 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={startNewChat}
+              className="flex flex-1 items-center justify-center gap-2 rounded-2xl bg-cyan-500 px-4 py-2.5 text-sm font-medium text-slate-950"
+            >
+              <Plus size={16} /> New chat
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowHistory(false)}
+              aria-label="Close history"
+              className="rounded-xl border border-slate-700 p-2.5 text-slate-300 md:hidden"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <p className="mb-2 flex items-center gap-2 px-1 text-xs font-medium uppercase tracking-widest text-slate-500">
+            <History size={13} /> Past chats
+          </p>
+          <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
+            {history.length === 0 && (
+              <p className="px-1 text-xs text-slate-500">
+                Closed-tab chats will appear here.
+              </p>
+            )}
+            {history.map((c) => (
+              <div
+                key={c.id}
+                className="group flex items-center gap-1 rounded-xl px-2 py-2 hover:bg-slate-800/60"
+              >
+                <button
+                  type="button"
+                  onClick={() => openArchived(c.id)}
+                  className="min-w-0 flex-1 text-left"
+                >
+                  <p className="truncate text-sm text-slate-200">{c.title}</p>
+                  <p className="text-[11px] text-slate-500">
+                    {c.at ? new Date(c.at).toLocaleString() : ""}
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => deleteArchived(c.id)}
+                  aria-label={`Delete ${c.title}`}
+                  className="shrink-0 rounded p-1 text-slate-500 opacity-0 hover:text-rose-300 focus:opacity-100 group-hover:opacity-100"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </aside>
+        {showHistory && (
+          <button
+            aria-hidden
+            tabIndex={-1}
+            onClick={() => setShowHistory(false)}
+            className="fixed inset-0 z-10 bg-black/50 md:hidden"
+          />
+        )}
       <section className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col px-4 py-6">
         <header className="mb-4 flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setShowHistory((v) => !v)}
+            aria-label="Toggle chat history"
+            className="rounded-xl border border-slate-700 p-2.5 text-slate-300 md:hidden"
+          >
+            <History size={18} />
+          </button>
           <div className="rounded-2xl bg-cyan-400/15 p-3 text-cyan-300">
             <Bot size={24} />
           </div>
@@ -552,9 +731,11 @@ export default function App() {
         <p className="mt-2 text-center text-xs text-slate-500">
           Tools: web search · policy docs · read-only SQL · live quotes
           <br />
-          History is kept in this browser (recent messages only — older turns drop off).
+          History is kept in this browser — past chats live in the sidebar, only
+          recent turns are sent to the model.
         </p>
       </section>
+      </div>
     </main>
   );
 }
