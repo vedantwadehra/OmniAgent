@@ -258,7 +258,7 @@ def get_stock_quote(ticker: str) -> str:
                     import datetime as _dt
 
                     last_date = _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).strftime("%Y-%m-%d")
-                    last_close = close
+                    last_close = round(close, 2)
             if price is None:
                 price = last_close
             if price is None:
@@ -268,7 +268,7 @@ def get_stock_quote(ticker: str) -> str:
             if last_date:
                 parts.append(f"last close {last_close} on {last_date}")
             if prev_close:
-                parts.append(f"previous close {prev_close}")
+                parts.append(f"previous close {round(prev_close, 2)}")
             if exchange:
                 parts.append(exchange)
             return (
