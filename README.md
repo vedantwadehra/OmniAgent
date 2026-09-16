@@ -122,7 +122,7 @@ browser ──POST /api/chat {messages}──▶ FastAPI ──SSE──▶ brow
 - Render free sleeps after ~15 min idle (UptimeRobot mitigates) and the
   account shares 750 hrs/month across services.
 - Conversation history persists in browser `localStorage` (per-browser,
-  per-device — not across devices); only the recent window (≤16 messages /
-  24 kB) is sent to the model, older turns drop off.
+  per-device — not across devices); only the recent window (≤30 messages /
+  28 kB) is sent to the model, older turns drop off.
 - Minor cosmetics: nested code-in-pre styling, per-message spinner scope,
   stale-online badge if the backend flaps after first connect.

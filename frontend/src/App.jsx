@@ -26,8 +26,8 @@ const SUGGESTIONS = [
   "What is your return policy for damaged items?",
   "What is the cheapest Audio product in stock?",
 ];
-const MAX_HISTORY_MESSAGES = 16;
-const MAX_HISTORY_CHARS = 24_000;
+const MAX_HISTORY_MESSAGES = 30;
+const MAX_HISTORY_CHARS = 28_000;
 const MAX_MESSAGE_CONTEXT_CHARS = 4_000;
 const MAX_TOOL_CONTEXT_CHARS = 1_800;
 

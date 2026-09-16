@@ -51,8 +51,8 @@ class ChatRequest(BaseModel):
     def validate_conversation(self):
         if self.messages[-1].role != "user":
             raise ValueError("the final message must have role 'user'")
-        if sum(len(message.content) for message in self.messages) > 30_000:
-            raise ValueError("conversation content exceeds the 30000 character limit")
+        if sum(len(message.content) for message in self.messages) > 32_000:
+            raise ValueError("conversation content exceeds the 32000 character limit")
         return self
 
 
