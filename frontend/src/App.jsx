@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Bot,
   Send,
@@ -122,6 +124,49 @@ function eventText(value) {
   if (value == null) return "";
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
+
+// Model citation artifacts (【...】) render as ugly literal text and carry no
+// links, so strip them before display. Raw history sent to the model is kept.
+function cleanDisplayText(value) {
+  return String(value || "").replace(/【[^】]*】/g, "");
+}
+
+const mdComponents = {
+  p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+  ul: ({ children }) => <ul className="mb-2 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>,
+  ol: ({ children }) => <ol className="mb-2 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>,
+  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+  strong: ({ children }) => <strong className="font-semibold text-slate-100">{children}</strong>,
+  h1: ({ children }) => <h1 className="mb-2 text-base font-semibold">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-2 text-base font-semibold">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-1 text-sm font-semibold">{children}</h3>,
+  h4: ({ children }) => <h4 className="mb-1 text-sm font-semibold">{children}</h4>,
+  a: ({ children, href }) => (
+    <a href={href} target="_blank" rel="noreferrer" className="text-cyan-300 underline hover:text-cyan-200">
+      {children}
+    </a>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="mb-2 border-l-2 border-slate-600 pl-3 text-slate-300">{children}</blockquote>
+  ),
+  code: ({ children }) => (
+    <code className="rounded bg-slate-800 px-1 py-0.5 text-[13px] text-cyan-100">{children}</code>
+  ),
+  pre: ({ children }) => (
+    <pre className="mb-2 overflow-x-auto rounded-xl border border-slate-700 bg-slate-950 p-3 text-xs">{children}</pre>
+  ),
+  table: ({ children }) => (
+    <div className="mb-2 overflow-x-auto rounded-xl border border-slate-700">
+      <table className="w-full border-collapse text-[13px]">{children}</table>
+    </div>
+  ),
+  thead: ({ children }) => <thead className="bg-slate-800">{children}</thead>,
+  th: ({ children }) => (
+    <th className="border-b border-slate-700 px-3 py-2 text-left font-semibold">{children}</th>
+  ),
+  td: ({ children }) => <td className="border-b border-slate-800 px-3 py-2 align-top">{children}</td>,
+  hr: () => <hr className="my-3 border-slate-700" />,
+};
 
 function parseSseFrame(frame) {
   const data = frame
@@ -305,8 +350,8 @@ export default function App() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col bg-slate-950 text-slate-100">
-      <section className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 py-6">
+    <main className="flex h-dvh flex-col bg-slate-950 text-slate-100">
+      <section className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col px-4 py-6">
         <header className="mb-4 flex items-center gap-3">
           <div className="rounded-2xl bg-cyan-400/15 p-3 text-cyan-300">
             <Bot size={24} />
@@ -342,7 +387,7 @@ export default function App() {
           role="log"
           aria-live="polite"
           aria-label="Conversation"
-          className="mb-4 max-h-[60vh] flex-1 space-y-4 overflow-y-auto rounded-3xl border border-slate-800 bg-slate-900/50 p-4"
+          className="mb-4 min-h-0 flex-1 space-y-4 overflow-y-auto rounded-3xl border border-slate-800 bg-slate-900/50 p-4"
         >
           {messages.length === 0 && (
             <div className="text-sm text-slate-400">
@@ -382,12 +427,18 @@ export default function App() {
               >
                 {m.role === "assistant" &&
                   m.tools.map((t) => <ToolPill key={t.key} run={t} />)}
-                <div className="whitespace-pre-wrap">
-                  {m.content}
-                  {m.role === "assistant" && loading && !m.content && (
-                    <Loader2 size={16} className="animate-spin text-slate-400" />
-                  )}
-                </div>
+                {m.role === "assistant" ? (
+                  <div className="text-sm leading-relaxed">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                      {cleanDisplayText(m.content)}
+                    </ReactMarkdown>
+                    {loading && !m.content && (
+                      <Loader2 size={16} className="animate-spin text-slate-400" />
+                    )}
+                  </div>
+                ) : (
+                  <div className="whitespace-pre-wrap">{m.content}</div>
+                )}
               </div>
               {m.role === "user" && (
                 <User size={18} className="mt-1 shrink-0 text-slate-400" />
