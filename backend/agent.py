@@ -159,6 +159,70 @@ def _run_tool(name: str, args: dict) -> str:
     return output
 
 
+# Permanent tool failures are decided locally and re-running them is useless.
+_PERMANENT_ERROR_RE = (
+    "unknown tool",
+    "invalid tool arguments",
+    "exceeds",
+    "blocked",
+    "not allowed",
+    "only read-only",
+    "not a valid ticker",
+    "empty",
+)
+_TRANSIENT_ERROR_RE = (
+    "temporarily unavailable",
+    "timeout",
+    "timed out",
+    "rate",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "connection",
+    "network",
+    "failed unexpectedly",
+)
+
+
+def _is_transient_error(output: str) -> bool:
+    """True when a tool error looks transient and worth one automatic retry."""
+    if not output.startswith("Error:"):
+        return False
+    text = output.lower()
+    if any(marker in text for marker in _PERMANENT_ERROR_RE):
+        return False
+    return any(marker in text for marker in _TRANSIENT_ERROR_RE)
+
+
+def _run_tool_with_retry(name: str, args: dict) -> tuple[str, bool]:
+    """Run a tool once, retrying a single time on transient errors.
+
+    Returns (output, was_retried). The retry happens inside the same loop
+    round so one blip does not cost the model an iteration.
+    """
+    output = _run_tool(name, args)
+    if not _is_transient_error(output):
+        return output, False
+    retry = _run_tool(name, args)
+    if not retry.startswith("Error:"):
+        return retry, True
+    return (
+        retry
+        + " (An automatic retry also failed; do not retry this exact call again. "
+        "Try a different query or tool, or answer from what you have.)"
+    ), True
+
+
+def _call_key(name: str, args: dict) -> str:
+    """Canonical identity of a tool call for duplicate detection."""
+    try:
+        return name + ":" + json.dumps(args, sort_keys=True)
+    except Exception:
+        return name + ":" + str(args)
+
+
 def _accumulate_tool_calls(chunk, calls: dict[int, dict]) -> None:
     """Reassemble Groq's streamed tool-call fragments by their stable index."""
 
@@ -217,6 +281,7 @@ async def stream_agent_events(history: list[dict]):
 
     answered = False
     failed = False
+    last_call_key: str | None = None
     try:
         for _ in range(MAX_ITERATIONS):
             try:
@@ -280,7 +345,10 @@ async def stream_agent_events(history: list[dict]):
                 args, arg_error = _parse_tool_args(call["function"]["arguments"])
                 call_id = call["id"]
                 yield {"type": "tool_start", "call_id": call_id, "tool": name, "input": args}
-                output = arg_error or await asyncio.to_thread(_run_tool, name, args)
+                if arg_error:
+                    output = arg_error
+                else:
+                    output, _retried = await asyncio.to_thread(_run_tool_with_retry, name, args)
                 status = "failed" if output.startswith("Error:") else "done"
                 yield {
                     "type": "tool_end",
@@ -289,12 +357,23 @@ async def stream_agent_events(history: list[dict]):
                     "output": output,
                     "status": status,
                 }
+                model_content = output
+                if not arg_error:
+                    key = _call_key(name, args)
+                    if key == last_call_key:
+                        # Same call as the previous round: nudge the model to
+                        # vary instead of looping. Kept out of the UI payload.
+                        model_content += (
+                            " (Note: this repeats your previous tool call with the same "
+                            "result. Do not call it a third time; broaden or change the query.)"
+                        )
+                    last_call_key = key
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call_id,
                         "name": name,
-                        "content": output,
+                        "content": model_content,
                     }
                 )
         if not answered and not failed:
