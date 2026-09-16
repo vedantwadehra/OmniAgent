@@ -21,7 +21,7 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health() -> dict[str, str]:
     """Return a lightweight liveness response for local and hosted checks."""
 
