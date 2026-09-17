@@ -247,8 +247,13 @@ function eventText(value) {
 
 // Model citation artifacts (【...】) render as ugly literal text and carry no
 // links, so strip them before display. Raw history sent to the model is kept.
+// Also normalize \(...\) / \[...\] math to $...$ so KaTeX renders regardless
+// of which delimiter habit the model used.
 function cleanDisplayText(value) {
-  return String(value || "").replace(/【[^】]*】/g, "");
+  return String(value || "")
+    .replace(/\\\((.+?)\\\)/gs, (_, m) => `$${m}$`)
+    .replace(/\\\[(.+?)\\\]/gs, (_, m) => `$${m}$`)
+    .replace(/【[^】]*】/g, "");
 }
 
 const mdComponents = {
