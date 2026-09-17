@@ -67,7 +67,7 @@ browser ──POST /api/chat {messages}──▶ FastAPI ──SSE──▶ brow
   final text ──▶ token events (true streaming) ──▶ done (exactly once)
 ```
 
-- History: the browser sends bounded history (≤16 msgs / 24 kB, tool evidence
+- History: the browser sends bounded history (≤30 msgs / 28 kB, tool evidence
   compacted); the backend maps it to Groq roles. Validation rejects empty,
   oversized, or assistant-last payloads with `422`.
 - Reliability inside the loop: transient tool errors are retried once in the
@@ -78,15 +78,15 @@ browser ──POST /api/chat {messages}──▶ FastAPI ──SSE──▶ brow
 
 ## Stack choices and why
 
-| Choice | Why |
-|---|---|
-| Groq `openai/gpt-oss-20b` (was Gemini 2.5-flash — Google retired it for new keys) | Free, fast, OpenAI-compatible function calling with true streaming |
-| Gemini `gemini-embedding-001` → 768 dims | pgvector `vector(768)`; `text-embedding-004` was already retired |
-| Supabase Postgres + pgvector | One managed free service for structured data and RAG; `match_store_documents` RPC does cosine search |
-| Tavily (primary) + DuckDuckGo (fallback) | Tavily returns dated results and works where DDG rate-limits this IP; time-sensitive queries hit Tavily's news index (last 7 days) |
-| Yahoo Finance chart API | Free, keyless, exact closes for live-price questions (news can never give "right now") |
-| No LangChain/LlamaIndex | Raw SDK calls keep the loop transparent and debuggable |
-| Vercel + Render + UptimeRobot | Free tiers that together stay up; the wake-up banner covers cold starts |
+| Choice                                                                            | Why                                                                                                                                |
+| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Groq `openai/gpt-oss-20b` (was Gemini 2.5-flash — Google retired it for new keys) | Free, fast, OpenAI-compatible function calling with true streaming                                                                 |
+| Gemini `gemini-embedding-001` → 768 dims                                          | pgvector `vector(768)`; `text-embedding-004` was already retired                                                                   |
+| Supabase Postgres + pgvector                                                      | One managed free service for structured data and RAG; `match_store_documents` RPC does cosine search                               |
+| Tavily (primary) + DuckDuckGo (fallback)                                          | Tavily returns dated results and works where DDG rate-limits this IP; time-sensitive queries hit Tavily's news index (last 7 days) |
+| Yahoo Finance chart API                                                           | Free, keyless, exact closes for live-price questions (news can never give "right now")                                             |
+| No LangChain/LlamaIndex                                                           | Raw SDK calls keep the loop transparent and debuggable                                                                             |
+| Vercel + Render + UptimeRobot                                                     | Free tiers that together stay up; the wake-up banner covers cold starts                                                            |
 
 ## Data generation
 
