@@ -10,3 +10,4 @@ node_modules/
 dist/
 .pytest_cache/
 
+AI_WRITEUP.md
